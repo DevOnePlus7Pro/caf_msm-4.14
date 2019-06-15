@@ -58,6 +58,9 @@ enum migratetype {
 #endif
 	MIGRATE_PCPTYPES, /* the number of types on the pcp lists */
 	MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
+#ifdef CONFIG_DEFRAG_HELPER
+	MIGRATE_UNMOVABLE_DEFRAG_POOL,
+#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
@@ -82,6 +85,12 @@ static inline bool is_migrate_movable(int mt)
 	return is_migrate_cma(mt) || mt == MIGRATE_MOVABLE;
 }
 
+#ifdef CONFIG_DEFRAG_HELPER
+static inline int is_migrate_defrag(int migratetype)
+{
+	return migratetype == MIGRATE_UNMOVABLE_DEFRAG_POOL;
+}
+#endif
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
 		for (type = 0; type < MIGRATE_TYPES; type++)
@@ -98,6 +107,9 @@ extern int page_group_by_mobility_disabled;
 struct free_area {
 	struct list_head	free_list[MIGRATE_TYPES];
 	unsigned long		nr_free;
+#ifdef CONFIG_DEFRAG_HELPER
+	unsigned long		nr_free_defrag;
+#endif
 };
 
 struct pglist_data;
@@ -150,6 +162,9 @@ enum zone_stat_item {
 	NR_ZSPAGES,		/* allocated in zsmalloc */
 #endif
 	NR_FREE_CMA_PAGES,
+#ifdef CONFIG_DEFRAG_HELPER
+	NR_FREE_DEFRAG_POOL,
+#endif
 	NR_VM_ZONE_STAT_ITEMS };
 
 enum node_stat_item {

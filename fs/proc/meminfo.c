@@ -154,7 +154,12 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "CmaFree:        ",
 		    global_zone_page_state(NR_FREE_CMA_PAGES));
 #endif
-
+#ifdef CONFIG_DEFRAG_HELPER
+	show_val_kb(m, "DefragPoolFree: ",
+		    global_zone_page_state(NR_FREE_DEFRAG_POOL));
+	show_val_kb(m, "RealMemFree:    ", i.freeram -
+		    global_zone_page_state(NR_FREE_DEFRAG_POOL));
+#endif
 	hugetlb_report_meminfo(m);
 
 	arch_report_meminfo(m);

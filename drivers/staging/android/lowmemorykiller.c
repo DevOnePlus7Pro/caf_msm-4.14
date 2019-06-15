@@ -207,8 +207,12 @@ static int lmk_vmpressure_notifier(struct notifier_block *nb,
 		other_file = global_node_page_state(NR_FILE_PAGES) -
 			global_node_page_state(NR_SHMEM) -
 			total_swapcache_pages();
+#ifdef CONFIG_DEFRAG_HELPER
+		other_free = global_zone_page_state(NR_FREE_PAGES) -
+			global_zone_page_state(NR_FREE_DEFRAG_POOL);
+#else
 		other_free = global_zone_page_state(NR_FREE_PAGES);
-
+#endif
 		atomic_set(&shift_adj, 1);
 		trace_almk_vmpressure(pressure, other_free, other_file);
 	} else if (pressure >= 90) {
@@ -221,7 +225,12 @@ static int lmk_vmpressure_notifier(struct notifier_block *nb,
 			global_node_page_state(NR_SHMEM) -
 			total_swapcache_pages();
 
+#ifdef CONFIG_DEFRAG_HELPER
+		other_free = global_zone_page_state(NR_FREE_PAGES) -
+			global_zone_page_state(NR_FREE_DEFRAG_POOL);
+#else
 		other_free = global_zone_page_state(NR_FREE_PAGES);
+#endif
 
 		if (other_free < lowmem_minfree[array_size - 1] &&
 		    other_file < vmpressure_file_min) {
@@ -1031,7 +1040,13 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 	enum lmk_missed_task mt = LMK_NOTHING_MISSED;
 	batch_kill_init(bkws);
 #endif
+#ifdef CONFIG_DEFRAG_HELPER
+	other_free = global_zone_page_state(NR_FREE_PAGES) -
+			global_zone_page_state(NR_FREE_DEFRAG_POOL) -
+						totalreserve_pages;
+#else
 	other_free = global_zone_page_state(NR_FREE_PAGES) - totalreserve_pages;
+#endif
 
 	if (global_node_page_state(NR_SHMEM) + total_swapcache_pages() +
 			global_node_page_state(NR_UNEVICTABLE) <
@@ -1326,6 +1341,9 @@ quick_select_fast:
 			"cache %ldkB is below limit %ldkB for oom score %hd\n"
 			"Free memory is %ldkB above reserved.\n"
 			"Free CMA is %ldkB\n"
+#ifdef CONFIG_DEFRAG_HELPER
+			"Free defrag is %ldkB\n"
+#endif
 			"Total reserve is %ldkB\n"
 			"Total free pages is %ldkB\n"
 			"Total file cache is %ldkB\n"
@@ -1339,6 +1357,10 @@ quick_select_fast:
 			free,
 			global_zone_page_state(NR_FREE_CMA_PAGES) *
 			(long)(PAGE_SIZE / 1024),
+#ifdef CONFIG_DEFRAG_HELPER
+			global_zone_page_state(NR_FREE_DEFRAG_POOL) *
+			(long)(PAGE_SIZE / 1024),
+#endif
 			totalreserve_pages * (long)(PAGE_SIZE / 1024),
 			global_zone_page_state(NR_FREE_PAGES) *
 			(long)(PAGE_SIZE / 1024),

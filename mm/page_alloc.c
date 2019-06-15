@@ -73,7 +73,9 @@
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
-
+#ifdef CONFIG_DEFRAG_HELPER
+#include <../drivers/oneplus/coretech/defrag/defrag_helper.h>
+#endif
 /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
 static DEFINE_MUTEX(pcp_batch_high_lock);
 #define MIN_PERCPU_PAGELIST_FRACTION	(8)
@@ -243,6 +245,9 @@ char * const migratetype_names[MIGRATE_TYPES] = {
 	"CMA",
 #endif
 	"HighAtomic",
+#ifdef CONFIG_DEFRAG_HELPER
+	"Defrag-Pool",
+#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	"Isolate",
 #endif
@@ -857,6 +862,10 @@ continue_merging:
 		} else {
 			list_del(&buddy->lru);
 			zone->free_area[order].nr_free--;
+#ifdef CONFIG_DEFRAG_HELPER
+			if (is_migrate_defrag(migratetype))
+				zone->free_area[order].nr_free_defrag--;
+#endif
 			rmv_page_order(buddy);
 		}
 		combined_pfn = buddy_pfn & pfn;
@@ -917,6 +926,10 @@ done_merging:
 	list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
 out:
 	zone->free_area[order].nr_free++;
+#ifdef CONFIG_DEFRAG_HELPER
+	if (is_migrate_defrag(migratetype))
+		zone->free_area[order].nr_free_defrag++;
+#endif
 }
 
 /*
@@ -1683,6 +1696,10 @@ static inline void expand(struct zone *zone, struct page *page,
 
 		list_add(&page[size].lru, &area->free_list[migratetype]);
 		area->nr_free++;
+#ifdef CONFIG_DEFRAG_HELPER
+		if (is_migrate_defrag(migratetype))
+			area->nr_free_defrag++;
+#endif
 		set_page_order(&page[size], high);
 	}
 }
@@ -1830,6 +1847,10 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
+#ifdef CONFIG_DEFRAG_HELPER
+		if (is_migrate_defrag(migratetype))
+			area->nr_free_defrag--;
+#endif
 		expand(zone, page, order, current_order, area, migratetype);
 		set_pcppage_migratetype(page, migratetype);
 		return page;
@@ -1849,6 +1870,9 @@ static int fallbacks[MIGRATE_TYPES][4] = {
 	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_TYPES },
 #ifdef CONFIG_CMA
 	[MIGRATE_CMA]         = { MIGRATE_TYPES }, /* Never used */
+#endif
+#ifdef CONFIG_DEFRAG_HELPER
+	[MIGRATE_UNMOVABLE_DEFRAG_POOL]		=  {MIGRATE_TYPES},
 #endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	[MIGRATE_ISOLATE]     = { MIGRATE_TYPES }, /* Never used */
@@ -1873,7 +1897,11 @@ static inline struct page *__rmqueue_cma_fallback(struct zone *zone,
  */
 static int move_freepages(struct zone *zone,
 			  struct page *start_page, struct page *end_page,
+#ifdef CONFIG_DEFRAG_HELPER
+			  int migratetype, int *num_movable, int old_mt)
+#else
 			  int migratetype, int *num_movable)
+#endif
 {
 	struct page *page;
 	unsigned int order;
@@ -1919,6 +1947,12 @@ static int move_freepages(struct zone *zone,
 		order = page_order(page);
 		list_move(&page->lru,
 			  &zone->free_area[order].free_list[migratetype]);
+#ifdef CONFIG_DEFRAG_HELPER
+		if (is_migrate_defrag(migratetype))
+			zone->free_area[order].nr_free_defrag++;
+		else if (is_migrate_defrag(old_mt))
+			zone->free_area[order].nr_free_defrag--;
+#endif
 		page += 1 << order;
 		pages_moved += 1 << order;
 	}
@@ -1927,7 +1961,11 @@ static int move_freepages(struct zone *zone,
 }
 
 int move_freepages_block(struct zone *zone, struct page *page,
+#ifdef CONFIG_DEFRAG_HELPER
+				int migratetype, int *num_movable, int old_mt)
+#else
 				int migratetype, int *num_movable)
+#endif
 {
 	unsigned long start_pfn, end_pfn;
 	struct page *start_page, *end_page;
@@ -1944,8 +1982,13 @@ int move_freepages_block(struct zone *zone, struct page *page,
 	if (!zone_spans_pfn(zone, end_pfn))
 		return 0;
 
+#ifndef CONFIG_DEFRAG_HELPER
 	return move_freepages(zone, start_page, end_page, migratetype,
 								num_movable);
+#else
+	return move_freepages(zone, start_page, end_page, migratetype,
+							num_movable, old_mt);
+#endif
 }
 
 static void change_pageblock_range(struct page *pageblock_page,
@@ -2026,9 +2069,13 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
 	/* We are not allowed to try stealing from the whole block */
 	if (!whole_block)
 		goto single_page;
-
+#ifdef CONFIG_DEFRAG_HELPER
+	free_pages = move_freepages_block(zone, page, start_type,
+				&movable_pages, old_block_type);
+#else
 	free_pages = move_freepages_block(zone, page, start_type,
 						&movable_pages);
+#endif
 	/*
 	 * Determine how many pages are compatible with our allocation.
 	 * For movable allocation, it's the number of movable pages which
@@ -2068,6 +2115,12 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
 single_page:
 	area = &zone->free_area[current_order];
 	list_move(&page->lru, &area->free_list[start_type]);
+#ifdef CONFIG_DEFRAG_HELPER
+	if (is_migrate_defrag(start_type))
+		area->nr_free_defrag++;
+	else if (is_migrate_defrag(old_block_type))
+		area->nr_free_defrag--;
+#endif
 }
 
 /*
@@ -2133,11 +2186,19 @@ static void reserve_highatomic_pageblock(struct page *page, struct zone *zone,
 
 	/* Yoink! */
 	mt = get_pageblock_migratetype(page);
+#ifndef CONFIG_DEFRAG_HELPER
 	if (!is_migrate_highatomic(mt) && !is_migrate_isolate(mt)
 	    && !is_migrate_cma(mt)) {
 		zone->nr_reserved_highatomic += pageblock_nr_pages;
 		set_pageblock_migratetype(page, MIGRATE_HIGHATOMIC);
 		move_freepages_block(zone, page, MIGRATE_HIGHATOMIC, NULL);
+#else
+	if (mt != MIGRATE_HIGHATOMIC && !is_migrate_isolate(mt) &&
+			!is_migrate_cma(mt) && !is_migrate_defrag(mt)) {
+		zone->nr_reserved_highatomic += pageblock_nr_pages;
+		set_pageblock_migratetype(page, MIGRATE_HIGHATOMIC);
+		move_freepages_block(zone, page, MIGRATE_HIGHATOMIC, NULL, mt);
+#endif
 	}
 
 out_unlock:
@@ -2214,8 +2275,13 @@ static bool unreserve_highatomic_pageblock(const struct alloc_context *ac,
 			 * may increase.
 			 */
 			set_pageblock_migratetype(page, ac->migratetype);
+#ifndef CONFIG_DEFRAG_HELPER
 			ret = move_freepages_block(zone, page, ac->migratetype,
 									NULL);
+#else
+			ret = move_freepages_block(zone, page, ac->migratetype,
+							NULL, MIGRATE_HIGHATOMIC);
+#endif
 			if (ret) {
 				spin_unlock_irqrestore(&zone->lock, flags);
 				return ret;
@@ -2342,6 +2408,14 @@ static inline struct page *__rmqueue_cma(struct zone *zone, unsigned int order)
 }
 #endif
 
+#ifdef CONFIG_DEFRAG_HELPER
+struct page *ctech___rmqueue(struct zone *zone, unsigned int order,
+			int migratetype)
+{
+	return __rmqueue(zone, order, migratetype);
+}
+EXPORT_SYMBOL(ctech___rmqueue);
+#endif
 /*
  * Obtain a specified number of elements from the buddy allocator, all under
  * a single hold of the lock, for efficiency.  Add them to the supplied list.
@@ -2766,6 +2840,10 @@ int __isolate_free_page(struct page *page, unsigned int order)
 	/* Remove page from free list */
 	list_del(&page->lru);
 	zone->free_area[order].nr_free--;
+#ifdef CONFIG_DEFRAG_HELPER
+	if (is_migrate_defrag(mt))
+		zone->free_area[order].nr_free_defrag--;
+#endif
 	rmv_page_order(page);
 
 	/*
@@ -2876,15 +2954,27 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 /*
  * Allocate a page from the given zone. Use pcplists for order-0 allocations.
  */
+#ifdef CONFIG_DEFRAG_HELPER
+static inline
+struct page *rmqueue_fp(int fp, struct zone *preferred_zone,
+			struct zone *zone, unsigned int order,
+			gfp_t gfp_flags, unsigned int alloc_flags,
+			int migratetype)
+#else
 static inline
 struct page *rmqueue(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
 			gfp_t gfp_flags, unsigned int alloc_flags,
 			int migratetype)
+#endif
 {
 	unsigned long flags;
 	struct page *page;
 
+#ifdef CONFIG_DEFRAG_HELPER
+	if (fp)
+		fp_usage_add(order);
+#endif
 	if (likely(order == 0)) {
 		page = rmqueue_pcplist(preferred_zone, zone, order,
 				gfp_flags, migratetype);
@@ -2896,6 +2986,12 @@ struct page *rmqueue(struct zone *preferred_zone,
 	 * allocate greater than order-1 page units with __GFP_NOFAIL.
 	 */
 	WARN_ON_ONCE((gfp_flags & __GFP_NOFAIL) && (order > 1));
+
+#ifdef CONFIG_DEFRAG_HELPER
+	page = ctech_defrag_alloc(zone, flags, migratetype, order);
+	if (page)
+		goto out;
+#endif
 	spin_lock_irqsave(&zone->lock, flags);
 
 	do {
@@ -2930,6 +3026,10 @@ out:
 	return page;
 
 failed:
+#ifdef CONFIG_DEFRAG_HELPER
+	if (fp)
+		fp_fail_add(order);
+#endif
 	local_irq_restore(flags);
 	return NULL;
 }
@@ -3025,6 +3125,10 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 	long min = mark;
 	int o;
 	const bool alloc_harder = (alloc_flags & (ALLOC_HARDER|ALLOC_OOM));
+#ifdef CONFIG_DEFRAG_HELPER
+	long ctech_calc;
+	long ctech_en;
+#endif
 
 	/* free_pages may go negative - that's OK */
 	free_pages -= (1 << order) - 1;
@@ -3059,6 +3163,11 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 		free_pages -= zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
 
+#ifdef CONFIG_DEFRAG_HELPER
+	ctech_calc = ctech_defrag_calc(z, order, alloc_flags);
+	ctech_en = !ctech_calc;
+	free_pages -= ctech_calc;
+#endif
 	/*
 	 * Check watermarks for an order-0 allocation request. If these
 	 * are not met, then a high-order request also cannot go ahead
@@ -3098,6 +3207,12 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 			return true;
 		}
 #endif
+#ifdef CONFIG_DEFRAG_HELPER
+		if (ctech_check_alloc_flag(alloc_flags, order) &&
+			!list_empty(&area->free_list[MIGRATE_UNMOVABLE_DEFRAG_POOL])) {
+			return true;
+		}
+#endif
 		if (alloc_harder &&
 			!list_empty(&area->free_list[MIGRATE_HIGHATOMIC]))
 			return true;
@@ -3117,13 +3232,17 @@ static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
 {
 	long free_pages = zone_page_state(z, NR_FREE_PAGES);
 	long cma_pages = 0;
-
+#ifdef CONFIG_DEFRAG_HELPER
+	long defrag_pages = 0;
+#endif
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
 	if (!(alloc_flags & ALLOC_CMA))
 		cma_pages = zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
-
+#ifdef CONFIG_DEFRAG_HELPER
+	defrag_pages = zone_page_state(z, NR_FREE_DEFRAG_POOL);
+#endif
 	/*
 	 * Fast check for order-0 only. If this fails then the reserves
 	 * need to be calculated. There is a corner case where the check
@@ -3131,7 +3250,13 @@ static inline bool zone_watermark_fast(struct zone *z, unsigned int order,
 	 * the caller is !atomic then it'll uselessly search the free
 	 * list. That corner case is then slower but it is harmless.
 	 */
-	if (!order && (free_pages - cma_pages) > mark + z->lowmem_reserve[classzone_idx])
+#ifdef CONFIG_DEFRAG_HELPER
+	if (!order && (free_pages - cma_pages - defrag_pages) > mark +
+			z->lowmem_reserve[classzone_idx])
+#else
+	if (!order && (free_pages - cma_pages) > mark +
+			z->lowmem_reserve[classzone_idx])
+#endif
 		return true;
 
 	return __zone_watermark_ok(z, order, mark, classzone_idx, alloc_flags,
@@ -3167,9 +3292,25 @@ static bool zone_allows_reclaim(struct zone *local_zone, struct zone *zone)
  * get_page_from_freelist goes through the zonelist trying to allocate
  * a page.
  */
+#ifdef CONFIG_DEFRAG_HELPER
+static struct page *
+get_page_from_freelist_fp(int fp, gfp_t gfp_mask, unsigned int order,
+			int alloc_flags, const struct alloc_context *ac);
 static struct page *
 get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
-						const struct alloc_context *ac)
+					const struct alloc_context *ac)
+{
+	return get_page_from_freelist_fp(0, gfp_mask, order, alloc_flags, ac);
+}
+
+static struct page *
+get_page_from_freelist_fp(int fp, gfp_t gfp_mask, unsigned int order,
+			int alloc_flags, const struct alloc_context *ac)
+#else
+static struct page *
+get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
+					const struct alloc_context *ac)
+#endif
 {
 	struct zoneref *z = ac->preferred_zoneref;
 	struct zone *zone;
@@ -3250,8 +3391,14 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 		}
 
 try_this_zone:
+#ifdef CONFIG_DEFRAG_HELPER
+		page = rmqueue_fp(fp, ac->preferred_zoneref->zone,
+							zone, order, gfp_mask,
+						alloc_flags, ac->migratetype);
+#else
 		page = rmqueue(ac->preferred_zoneref->zone, zone, order,
-				gfp_mask, alloc_flags, ac->migratetype);
+					gfp_mask, alloc_flags, ac->migratetype);
+#endif
 		if (page) {
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
@@ -3802,6 +3949,10 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 				(gfp_mask & __GFP_CMA))
 		alloc_flags |= ALLOC_CMA;
 #endif
+#ifdef CONFIG_DEFRAG_HELPER
+	if (gfpflags_to_migratetype(gfp_mask) == MIGRATE_UNMOVABLE)
+		alloc_flags |= ALLOC_UNMOVE;
+#endif
 	return alloc_flags;
 }
 
@@ -4281,6 +4432,10 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 	if (IS_ENABLED(CONFIG_CMA) && ac->migratetype == MIGRATE_MOVABLE &&
 			(gfp_mask & __GFP_CMA))
 		*alloc_flags |= ALLOC_CMA;
+#ifdef CONFIG_DEFRAG_HELPER
+	if (ac->migratetype == MIGRATE_UNMOVABLE)
+		*alloc_flags |= ALLOC_UNMOVE;
+#endif
 
 	return true;
 }
@@ -4321,7 +4476,12 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 	finalise_ac(gfp_mask, order, &ac);
 
 	/* First allocation attempt */
+#ifdef CONFIG_DEFRAG_HELPER
+	page = get_page_from_freelist_fp(1, alloc_mask, order,
+							alloc_flags, &ac);
+#else
 	page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
+#endif
 	if (likely(page))
 		goto out;
 
@@ -4785,6 +4945,9 @@ static void show_migration_types(unsigned char type)
 #ifdef CONFIG_MEMORY_ISOLATION
 		[MIGRATE_ISOLATE]	= 'I',
 #endif
+#ifdef CONFIG_DEFRAG_HELPER
+		[MIGRATE_UNMOVABLE_DEFRAG_POOL]	= 'D',
+#endif
 	};
 	char tmp[MIGRATE_TYPES + 1];
 	char *p = tmp;
@@ -4828,6 +4991,9 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 		" unevictable:%lu dirty:%lu writeback:%lu unstable:%lu\n"
 		" slab_reclaimable:%lu slab_unreclaimable:%lu\n"
 		" mapped:%lu shmem:%lu pagetables:%lu bounce:%lu\n"
+#ifdef CONFIG_DEFRAG_HELPER
+		" defragfree:%lu\n"
+#endif
 		" free:%lu free_pcp:%lu free_cma:%lu\n",
 		global_node_page_state(NR_ACTIVE_ANON),
 		global_node_page_state(NR_INACTIVE_ANON),
@@ -4845,6 +5011,9 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 		global_node_page_state(NR_SHMEM),
 		global_zone_page_state(NR_PAGETABLE),
 		global_zone_page_state(NR_BOUNCE),
+#ifdef CONFIG_DEFRAG_HELPER
+		global_zone_page_state(NR_FREE_DEFRAG_POOL),
+#endif
 		global_zone_page_state(NR_FREE_PAGES),
 		free_pcp,
 		global_zone_page_state(NR_FREE_CMA_PAGES));
@@ -4929,6 +5098,9 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 			" bounce:%lukB"
 			" free_pcp:%lukB"
 			" local_pcp:%ukB"
+#ifdef CONFIG_DEFRAG_HELPER
+			" defrag:%lukB"
+#endif
 			" free_cma:%lukB"
 			"\n",
 			zone->name,
@@ -4950,6 +5122,9 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 			K(zone_page_state(zone, NR_BOUNCE)),
 			K(free_pcp),
 			K(this_cpu_read(zone->pageset->pcp.count)),
+#ifdef CONFIG_DEFRAG_HELPER
+			K(zone_page_state(zone, NR_FREE_DEFRAG_POOL)),
+#endif
 			K(zone_page_state(zone, NR_FREE_CMA_PAGES)));
 		printk("lowmem_reserve[]:");
 		for (i = 0; i < MAX_NR_ZONES; i++)
@@ -4961,7 +5136,9 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 		unsigned int order;
 		unsigned long nr[MAX_ORDER], flags, total = 0;
 		unsigned char types[MAX_ORDER];
-
+#ifdef CONFIG_DEFRAG_HELPER
+		unsigned long nr_defrag[MAX_ORDER], total_defrag = 0;
+#endif
 		if (show_mem_node_skip(filter, zone_to_nid(zone), nodemask))
 			continue;
 		show_node(zone);
@@ -4974,6 +5151,10 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 
 			nr[order] = area->nr_free;
 			total += nr[order] << order;
+#ifdef CONFIG_DEFRAG_HELPER
+			nr_defrag[order] = area->nr_free_defrag;
+			total_defrag += nr_defrag[order] << order;
+#endif
 
 			types[order] = 0;
 			for (type = 0; type < MIGRATE_TYPES; type++) {
@@ -4989,6 +5170,14 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 				show_migration_types(types[order]);
 		}
 		printk(KERN_CONT "= %lukB\n", K(total));
+#ifdef CONFIG_DEFRAG_HELPER
+		printk(KERN_CONT "DEFRAG: ");
+		for (order = 0; order < MAX_ORDER; order++) {
+			printk(KERN_CONT "%lu*%lukB ",
+			       nr_defrag[order], K(1UL) << order);
+		}
+		printk(KERN_CONT "= %lukB\n", K(total_defrag));
+#endif
 	}
 
 	hugetlb_show_meminfo();
@@ -5420,6 +5609,9 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 	pg_data_t *pgdat = NODE_DATA(nid);
 	unsigned long pfn;
 	unsigned long nr_initialised = 0;
+#ifdef CONFIG_DEFRAG_HELPER
+	unsigned long unmov_end_pfn = 0;
+#endif
 #ifdef CONFIG_HAVE_MEMBLOCK_NODE_MAP
 	struct memblock_region *r = NULL, *tmp;
 #endif
@@ -5427,6 +5619,10 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 	if (highest_memmap_pfn < end_pfn - 1)
 		highest_memmap_pfn = end_pfn - 1;
 
+#ifdef CONFIG_DEFRAG_HELPER
+	if (nid == 0)
+		unmov_end_pfn = start_pfn + (size >> 2);
+#endif
 	/*
 	 * Honor reservation requested by the driver for this ZONE_DEVICE
 	 * memory
@@ -5488,7 +5684,25 @@ not_early:
 			struct page *page = pfn_to_page(pfn);
 
 			__init_single_page(page, pfn, zone, nid);
+#ifndef CONFIG_DEFRAG_HELPER
 			set_pageblock_migratetype(page, MIGRATE_MOVABLE);
+#else
+			if (zone != ZONE_MOVABLE) {
+				if (unmov_end_pfn && pfn < unmov_end_pfn)
+					set_pageblock_migratetype(page,
+								MIGRATE_UNMOVABLE);
+				else {
+					if (unmov_end_pfn && pfn <
+						(unmov_end_pfn + DEFRAG_POOL_SIZE))
+						set_pageblock_migratetype(page,
+							MIGRATE_UNMOVABLE_DEFRAG_POOL);
+					else
+						set_pageblock_migratetype(page,
+								MIGRATE_MOVABLE);
+				}
+			} else
+				set_pageblock_migratetype(page, MIGRATE_MOVABLE);
+#endif
 			cond_resched();
 		} else {
 			__init_single_pfn(pfn, zone, nid);
@@ -5502,6 +5716,9 @@ static void __meminit zone_init_free_lists(struct zone *zone)
 	for_each_migratetype_order(order, t) {
 		INIT_LIST_HEAD(&zone->free_area[order].free_list[t]);
 		zone->free_area[order].nr_free = 0;
+#ifdef CONFIG_DEFRAG_HELPER
+		zone->free_area[order].nr_free_defrag = 0;
+#endif
 	}
 }
 
@@ -7893,6 +8110,10 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 		list_del(&page->lru);
 		rmv_page_order(page);
 		zone->free_area[order].nr_free--;
+#ifdef CONFIG_DEFRAG_HELPER
+		if (is_migrate_defrag(get_pageblock_migratetype(page)))
+			zone->free_area[order].nr_free_defrag--;
+#endif
 		for (i = 0; i < (1 << order); i++)
 			SetPageReserved((page+i));
 		post_alloc_hook(page, order, GFP_NOWAIT);
