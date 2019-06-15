@@ -94,6 +94,9 @@
 #include <linux/flex_array.h>
 #include <linux/posix-timers.h>
 #include <linux/cpufreq_times.h>
+#ifdef CONFIG_ADJ_CHAIN
+#include <linux/adj_chain.h>
+#endif
 #ifdef CONFIG_HARDWALL
 #include <asm/hardwall.h>
 #endif
@@ -1046,6 +1049,9 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 	struct mm_struct *mm = NULL;
 	struct task_struct *task;
 	int err = 0;
+#ifdef CONFIG_ADJ_CHAIN
+	int need_update_oom_score_adj = 0;
+#endif
 
 	task = get_proc_task(file_inode(file));
 	if (!task)
@@ -1091,6 +1097,9 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 	}
 
 	task->signal->oom_score_adj = oom_adj;
+#ifdef CONFIG_ADJ_CHAIN
+	adj_chain_update_oom_score_adj(task);
+#endif
 	if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
 		task->signal->oom_score_adj_min = (short)oom_adj;
 	trace_oom_score_adj_update(task);
@@ -1108,16 +1117,26 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 				continue;
 
 			task_lock(p);
+#ifdef CONFIG_ADJ_CHAIN
+			need_update_oom_score_adj = 0;
+#endif
 			if (!p->vfork_done && process_shares_mm(p, mm)) {
 				pr_info("updating oom_score_adj for %d (%s) from %d to %d because it shares mm with %d (%s). Report if this is unexpected.\n",
 						task_pid_nr(p), p->comm,
 						p->signal->oom_score_adj, oom_adj,
 						task_pid_nr(task), task->comm);
 				p->signal->oom_score_adj = oom_adj;
+#ifdef CONFIG_ADJ_CHAIN
+				need_update_oom_score_adj = 1;
+#endif
 				if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
 					p->signal->oom_score_adj_min = (short)oom_adj;
 			}
 			task_unlock(p);
+#ifdef CONFIG_ADJ_CHAIN
+			if (need_update_oom_score_adj)
+				adj_chain_update_oom_score_adj(p);
+#endif
 		}
 		rcu_read_unlock();
 		mmdrop(mm);
