@@ -1341,6 +1341,13 @@ struct task_struct {
 	 */
 	randomized_struct_fields_end
 
+#ifdef CONFIG_OPCHAIN
+	u64 utask_tag;
+	u64 utask_tag_base;
+	int etask_claim;
+	int claim_cpu;
+	bool utask_slave;
+#endif
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
 
